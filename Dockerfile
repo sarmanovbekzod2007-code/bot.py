@@ -13,4 +13,4 @@ COPY . .
 
 # Botni ishga tushirish buyrug'i 
 # (Agar asosiy faylingiz nomi main.py bo'lmasa, uni o'zgartiring)
-CMD ["python", "bot.py"]
+CMD ["python", "Bot.py"]
