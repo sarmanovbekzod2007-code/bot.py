@@ -3,11 +3,11 @@ from aiogram import Bot, Dispatcher, executor, types
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # ====== SOZLAMALAR ======
-API_TOKEN = "8594052857:AAHpfMGhVnq56g2a-QlgWOWID5NvsfIDU8E"          # BotFather token
+API_TOKEN = "8535096708:AAHSyrXWQJPDmw9BiiL4jqm2s-1vqejH8to"          # BotFather token
 ADMIN_ID = 5662756526            # Admin ID
 CHANNEL = "@uzkinoos"          # Majburiy obuna kanali
 POST_CHANNEL = "@uzkinoos"     # Auto-post kanali
-PROTECT_CONTENT = film
+PROTECT_CONTENT = True
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=API_TOKEN)
