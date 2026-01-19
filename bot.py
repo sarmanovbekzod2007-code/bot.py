@@ -1,167 +1,217 @@
-import logging, sqlite3, time
-from aiogram import Bot, Dispatcher, executor, types
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+import asyncio
+import logging
+import sqlite3
+import os
 
-# ====== SOZLAMALAR ======
-API_TOKEN = "8535096708:AAHSyrXWQJPDmw9BiiL4jqm2s-1vqejH8to"          # BotFather token
-ADMIN_ID = 5662756526            # Admin ID
-CHANNEL = "@uzkinoos"          # Majburiy obuna kanali
-POST_CHANNEL = "@uzkinoos"     # Auto-post kanali
-PROTECT_CONTENT = True
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import CommandStart
+from aiogram.types import (
+    ReplyKeyboardMarkup, KeyboardButton,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
+from aiogram.enums import ParseMode
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+
+# ================== SOZLAMALAR ==================
+BOT_TOKEN = os.getenv("8535096708:AAHSyrXWQJPDmw9BiiL4jqm2s-1vqejH8to") or "BOT_TOKEN_BU_YERGA"
+ADMIN_ID = 5662756526
+
+CHANNEL_USERNAME = "@uzkinoos"
+CHANNEL_LINK = "https://t.me/uzkinoos"
 
 logging.basicConfig(level=logging.INFO)
-bot = Bot(token=API_TOKEN)
-dp = Dispatcher(bot)
 
-# ====== DATABASE ======
-db = sqlite3.connect("kino.db", check_same_thread=False)
-sql = db.cursor()
+bot = Bot(token=BOT_TOKEN, parse_mode=ParseMode.HTML)
+dp = Dispatcher()
 
-# Users table
-sql.execute("""CREATE TABLE IF NOT EXISTS users(
-id INTEGER PRIMARY KEY,
-vip_until INTEGER DEFAULT 0,
-favorites TEXT DEFAULT ''
-)""")
+# ================== DATABASE ==================
+conn = sqlite3.connect("kino.db")
+cursor = conn.cursor()
 
-# Movies table
-sql.execute("""CREATE TABLE IF NOT EXISTS movies(
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-name TEXT,
-code TEXT UNIQUE,
-file_id TEXT,
-views INTEGER DEFAULT 0,
-vip INTEGER DEFAULT 0
-)""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS users (
+    user_id INTEGER PRIMARY KEY
+)
+""")
 
-# Series table
-sql.execute("""CREATE TABLE IF NOT EXISTS series(
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-name TEXT
-)""")
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS movies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    code TEXT UNIQUE,
+    title TEXT,
+    file_id TEXT,
+    likes INTEGER DEFAULT 0
+)
+""")
 
-# Episodes table
-sql.execute("""CREATE TABLE IF NOT EXISTS episodes(
-id INTEGER PRIMARY KEY AUTOINCREMENT,
-series_id INTEGER,
-title TEXT,
-file_id TEXT
-)""")
-db.commit()
+conn.commit()
 
-# ====== MENYULAR ======
-def main_menu():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("🔎 Qidiruv", callback_data="search"),
-        InlineKeyboardButton("🔥 Top 10", callback_data="top"),
-        InlineKeyboardButton("📺 Seriallar", callback_data="series"),
-        InlineKeyboardButton("❤️ Sevimlilar", callback_data="fav")
-    )
-    return kb
+# ================== FSM ==================
+class AddMovie(StatesGroup):
+    code = State()
+    title = State()
+    video = State()
 
-def admin_menu():
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton("➕ Kino", callback_data="add_movie"),
-        InlineKeyboardButton("➕ Serial", callback_data="add_series"),
-        InlineKeyboardButton("➕ Qism", callback_data="add_episode"),
-        InlineKeyboardButton("⭐ VIP", callback_data="vip"),
-        InlineKeyboardButton("📢 Auto-post", callback_data="autopost"),
-        InlineKeyboardButton("📊 Statistika", callback_data="stats"),
-        InlineKeyboardButton("⬅️ Chiqish", callback_data="exit")
-    )
-    return kb
+# ================== KEYBOARDS ==================
+user_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🔍 Qidiruv"), KeyboardButton(text="🔥 Top 10")],
+        [KeyboardButton(text="📺 Seriallar")]
+    ],
+    resize_keyboard=True
+)
 
-# ====== UTILS ======
-async def check_sub(uid):
+admin_keyboard = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="🎬 Kino qo‘shish")],
+        [KeyboardButton(text="📊 Statistika")]
+    ],
+    resize_keyboard=True
+)
+
+subscribe_keyboard = InlineKeyboardMarkup(
+    inline_keyboard=[
+        [InlineKeyboardButton(text="📢 Kanalga obuna bo‘lish", url=CHANNEL_LINK)],
+        [InlineKeyboardButton(text="✅ Tekshirish", callback_data="check_sub")]
+    ]
+)
+
+# ================== TEXTS ==================
+USER_START_TEXT = (
+    "🎬 <b>Uz Kino botga xush kelibsiz!</b>\n\n"
+    "🔎 Kino nomi yoki kodi (masalan: <b>125</b>) yuboring\n"
+    "🔥 Eng mashhur kinolar\n"
+    "📺 Sifatli kontent\n\n"
+    "👇 Menyudan foydalaning"
+)
+
+ADMIN_START_TEXT = (
+    "👑 <b>Admin panel</b>\n\n"
+    "🎬 Kino qo‘shish\n"
+    "📊 Statistika"
+)
+
+# ================== HELPERS ==================
+async def check_subscription(user_id: int):
     try:
-        m = await bot.get_chat_member(CHANNEL, uid)
-        return m.status != "left"
+        member = await bot.get_chat_member(CHANNEL_USERNAME, user_id)
+        return member.status in ["member", "administrator", "creator"]
     except:
         return False
 
-def is_vip(uid):
-    r = sql.execute("SELECT vip_until FROM users WHERE id=?",(uid,)).fetchone()
-    return r and r[0] > int(time.time())
+def save_user(user_id):
+    cursor.execute(
+        "INSERT OR IGNORE INTO users (user_id) VALUES (?)",
+        (user_id,)
+    )
+    conn.commit()
 
-# ====== START ======
-@dp.message_handler(commands=["start"])
-async def start(m: types.Message):
-    sql.execute("INSERT OR IGNORE INTO users(id) VALUES(?)",(m.from_user.id,))
-    db.commit()
-    if not await check_sub(m.from_user.id):
-        kb = InlineKeyboardMarkup().add(
-            InlineKeyboardButton("📢 Obuna", url=f"https://t.me/{CHANNEL[1:]}"),
-            InlineKeyboardButton("✅ Tekshirish", callback_data="check")
+# ================== START ==================
+@dp.message(CommandStart())
+async def start(message: types.Message):
+    save_user(message.from_user.id)
+
+    if not await check_subscription(message.from_user.id):
+        await message.answer(
+            "❗ Botdan foydalanish uchun kanalga obuna bo‘ling:",
+            reply_markup=subscribe_keyboard
         )
-        return await m.answer("❗ Avval kanalga obuna bo‘ling", reply_markup=kb)
-    await m.answer("🎬 ULTRA PRO KINO BOT", reply_markup=main_menu())
+        return
 
-@dp.callback_query_handler(text="check")
-async def recheck(c: types.CallbackQuery):
-    if await check_sub(c.from_user.id):
-        await c.message.edit_text("✅ Tayyor", reply_markup=main_menu())
+    if message.from_user.id == ADMIN_ID:
+        await message.answer(ADMIN_START_TEXT, reply_markup=admin_keyboard)
     else:
-        await c.answer("❌ Obuna yo‘q", show_alert=True)
+        await message.answer(USER_START_TEXT, reply_markup=user_keyboard)
 
-# ====== QIDIRUV ======
-@dp.message_handler(lambda m: m.text and m.text.isdigit())
-async def by_code(m: types.Message):
-    r = sql.execute("SELECT file_id,name,vip FROM movies WHERE code=?",(m.text,)).fetchone()
-    if not r: return await m.answer("❌ Topilmadi")
-    if r[2]==1 and not is_vip(m.from_user.id):
-        return await m.answer("🔒 VIP kino")
-    sql.execute("UPDATE movies SET views=views+1 WHERE code=?",(m.text,))
-    db.commit()
-    await m.answer_video(r[0], caption=f"🎬 {r[1]}", protect_content=PROTECT_CONTENT)
+@dp.callback_query(F.data == "check_sub")
+async def check_sub(callback: types.CallbackQuery):
+    if await check_subscription(callback.from_user.id):
+        await callback.message.delete()
+        await start(callback.message)
+    else:
+        await callback.answer("❌ Hali obuna emassiz", show_alert=True)
 
-@dp.callback_query_handler(text="search")
-async def ask(c: types.CallbackQuery):
-    await c.message.answer("🔎 Kino nomini yozing:")
+# ================== ADMIN: STATISTIKA ==================
+@dp.message(F.text == "📊 Statistika")
+async def stats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
 
-@dp.message_handler(lambda m: m.text and not m.text.isdigit())
-async def search(m: types.Message):
-    rows = sql.execute("SELECT name,code FROM movies WHERE name LIKE ? LIMIT 10",(f"%{m.text}%",)).fetchall()
-    if rows:
-        await m.answer("🔎 Natija:\n"+"\n".join([f"{n} — `{c}`" for n,c in rows]), parse_mode="Markdown")
+    cursor.execute("SELECT COUNT(*) FROM users")
+    users = cursor.fetchone()[0]
+    cursor.execute("SELECT COUNT(*) FROM movies")
+    movies = cursor.fetchone()[0]
 
-# ====== TOP 10 ======
-@dp.callback_query_handler(text="top")
-async def top(c: types.CallbackQuery):
-    rows = sql.execute("SELECT name,code,views FROM movies ORDER BY views DESC LIMIT 10").fetchall()
-    await c.message.answer("🔥 Top 10:\n"+"\n".join([f"{i+1}. {n} ({v}) — `{c}`" for i,(n,c,v) in enumerate(rows)]), parse_mode="Markdown")
+    await message.answer(
+        f"📊 <b>Statistika</b>\n\n"
+        f"👤 Foydalanuvchilar: <b>{users}</b>\n"
+        f"🎬 Kinolar: <b>{movies}</b>"
+    )
 
-# ====== SERIAL ======
-@dp.callback_query_handler(text="series")
-async def series_list(c: types.CallbackQuery):
-    rows = sql.execute("SELECT id,name FROM series").fetchall()
-    if not rows: return await c.message.answer("📺 Serial yo‘q")
-    kb = InlineKeyboardMarkup()
-    for i,n in rows:
-        kb.add(InlineKeyboardButton(n, callback_data=f"s_{i}"))
-    await c.message.answer("📺 Seriallar:", reply_markup=kb)
+# ================== ADMIN: KINO QO‘SHISH ==================
+@dp.message(F.text == "🎬 Kino qo‘shish")
+async def add_movie_start(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+    await state.set_state(AddMovie.code)
+    await message.answer("🎬 Kino kodini yuboring (masalan: 125)")
 
-@dp.callback_query_handler(lambda c: c.data.startswith("s_"))
-async def episodes(c: types.CallbackQuery):
-    sid = int(c.data.split("_")[1])
-    rows = sql.execute("SELECT title,file_id FROM episodes WHERE series_id=?",(sid,)).fetchall()
-    for t,f in rows:
-        await c.message.answer_video(f, caption=t, protect_content=PROTECT_CONTENT)
+@dp.message(AddMovie.code)
+async def add_movie_code(message: types.Message, state: FSMContext):
+    await state.update_data(code=message.text.strip())
+    await state.set_state(AddMovie.title)
+    await message.answer("🎬 Kino nomini yuboring")
 
-# ====== ADMIN ======
-@dp.message_handler(commands=["admin"])
-async def admin(m: types.Message):
-    if m.from_user.id==ADMIN_ID:
-        await m.answer("🧑‍💼 ADMIN PANEL", reply_markup=admin_menu())
+@dp.message(AddMovie.title)
+async def add_movie_title(message: types.Message, state: FSMContext):
+    await state.update_data(title=message.text.strip())
+    await state.set_state(AddMovie.video)
+    await message.answer("🎥 Endi kino videosini yuboring")
 
-@dp.callback_query_handler(text="exit")
-async def exit_admin(c: types.CallbackQuery):
-    await c.message.edit_text("🎬 KINO BOT", reply_markup=main_menu())
+@dp.message(AddMovie.video, F.video)
+async def add_movie_video(message: types.Message, state: FSMContext):
+    data = await state.get_data()
 
-# Admin funksiyalar: add_movie, add_series, add_episode, vip, autopost, stats
-# Siz kodni shunga moslab davom ettirishingiz mumkin
+    cursor.execute(
+        "INSERT INTO movies (code, title, file_id) VALUES (?, ?, ?)",
+        (data["code"], data["title"], message.video.file_id)
+    )
+    conn.commit()
 
-# ====== RUN ======
-if __name__=="__main__":
-    executor.start_polling(dp, skip_updates=True)
+    await state.clear()
+    await message.answer("✅ Kino muvaffaqiyatli qo‘shildi")
+
+# ================== QIDIRUV (NOM + KOD) ==================
+@dp.message()
+async def search_movie(message: types.Message):
+    text = message.text.strip()
+
+    if text.isdigit():
+        cursor.execute(
+            "SELECT title, file_id FROM movies WHERE code = ?",
+            (text,)
+        )
+    else:
+        cursor.execute(
+            "SELECT title, file_id FROM movies WHERE title LIKE ?",
+            (f"%{text}%",)
+        )
+
+    movie = cursor.fetchone()
+
+    if movie:
+        await message.answer_video(
+            video=movie[1],
+            caption=f"🎬 <b>{movie[0]}</b>",
+            protect_content=True
+        )
+    else:
+        await message.answer("❌ Kino topilmadi")
+
+# ================== RUN ==================
+async def main():
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
